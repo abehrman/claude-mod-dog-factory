@@ -1,0 +1,5 @@
+{
+  "name": "claude-mod-dog-factory",
+  "owner": { "name": "abehrman" },
+  "plugins": [{ "name": "dog-factory", "source": "./" }]
+}
