@@ -26,12 +26,13 @@ test('the SVG scene is a bounded animated document', () => {
 })
 
 test('the SVG caps crowds with a +N tag', () => {
-  const svg = factorySvg({ ...BUSY, asks: 7, steps: 9, shipped: 12, workers: Array.from({ length: 6 }, (_, i) => ({ dog: `D${i}` })) })
-  expect(svg).toContain('>+2<')
-  expect(svg).toContain('>+4<')
-  expect(svg).toContain('>+7<')
-  expect(svg).toContain('>+1<')
+  const svg = factorySvg({ ...BUSY, asks: 7, steps: 9, shipped: 12, workers: Array.from({ length: 8 }, (_, i) => ({ dog: `D${i}` })) })
+  expect(svg).toContain('>+2 more<') // asks past 5
+  expect(svg).toContain('>+3<') // crates past 6
+  expect(svg).toContain('>+2<') // shelf past 10, workers past 6
   expect(svg.length).toBeLessThan(131072)
+  const roomy = factorySvg({ ...BUSY, steps: 6, shipped: 10, workers: Array.from({ length: 6 }, (_, i) => ({ dog: `D${i}` })) })
+  expect(roomy).not.toMatch(/>\+\d/)
 })
 
 test('the wall gauge shows the context fill', () => {
@@ -40,7 +41,8 @@ test('the wall gauge shows the context fill', () => {
   expect(svg).toContain('>72%<')
   expect(svg).toContain('Context window 72% full')
   expect(factorySvg(BUSY)).toContain('>--<')
-  expect(svg).toContain('width="400" height="180"')
+  expect(svg).toContain('viewBox="0 0 400 320"')
+  expect(svg).toContain('width="100%"')
 })
 
 test('steps in progress light up their crates', () => {

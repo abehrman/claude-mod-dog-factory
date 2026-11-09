@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Board, Item, ItemKind, RunningAgent, Usage } from '../types'
+import type { Board, Item, ItemKind, RunningAgent, Usage, UsageCategory } from '../types'
 import {
   addItem,
   ageOf,
@@ -38,12 +38,23 @@ const frameAtom = atom({ plugin: 'dog-factory', key: 'frame' } as const, 0)
 const usageAtom = atom({ plugin: 'dog-factory', key: 'usage' } as const, null as Usage | null)
 
 type Measured = {
-  context: { window: number; tokens?: number; percent?: number }
+  context: {
+    window: number
+    tokens?: number
+    percent?: number
+    breakdown?: {
+      categories: { name: string; tokens: number; isDeferred: boolean }[]
+      rawMaxTokens: number
+      autoCompactThreshold?: number
+      memoryFiles: unknown[]
+      mcpTools: unknown[]
+    }
+  }
   rateLimits: { kind: string; percentUsed: number }[]
   cost?: { usd: number }
 }
 
-function usageOf(m: Measured): Usage {
+function usageOf(m: Measured, previous: Usage | null): Usage {
   const usage: Usage = { window: m.context.window }
   if (m.context.tokens !== undefined) usage.tokens = m.context.tokens
   if (m.context.percent !== undefined) usage.percent = m.context.percent
@@ -52,6 +63,21 @@ function usageOf(m: Measured): Usage {
   if (five) usage.fiveHour = five.percentUsed
   if (seven) usage.sevenDay = seven.percentUsed
   if (m.cost) usage.usd = m.cost.usd
+  const b = m.context.breakdown
+  if (b) {
+    usage.categories = b.categories.map(c => ({ name: c.name, tokens: c.tokens, isDeferred: c.isDeferred }))
+    usage.compactWindow = b.rawMaxTokens
+    if (b.autoCompactThreshold !== undefined) usage.autoCompactAt = b.autoCompactThreshold
+    usage.memoryFiles = b.memoryFiles.length
+    usage.mcpTools = b.mcpTools.length
+  } else if (previous?.categories) {
+    // A measurement without a breakdown keeps the last one.
+    usage.categories = previous.categories
+    if (previous.compactWindow !== undefined) usage.compactWindow = previous.compactWindow
+    if (previous.autoCompactAt !== undefined) usage.autoCompactAt = previous.autoCompactAt
+    if (previous.memoryFiles !== undefined) usage.memoryFiles = previous.memoryFiles
+    if (previous.mcpTools !== undefined) usage.mcpTools = previous.mcpTools
+  }
   return usage
 }
 
@@ -59,18 +85,69 @@ function thousands(n: number): string {
   return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)
 }
 
+function percentOf(usage: Usage): number | undefined {
+  return usage.percent ?? (usage.tokens !== undefined ? Math.round((usage.tokens / usage.window) * 100) : undefined)
+}
+
+function bar(fraction: number, cells: number): string {
+  const filled = Math.round(Math.max(0, Math.min(1, fraction)) * cells)
+  return '▰'.repeat(filled) + '▱'.repeat(cells - filled)
+}
+
 function usageLine(usage: Usage | null): string {
   if (usage === null) return 'Context: not measured yet'
-  const parts: string[] = []
-  const pct = usage.percent ?? (usage.tokens !== undefined ? Math.round((usage.tokens / usage.window) * 100) : undefined)
-  const filled = pct === undefined ? 0 : Math.round(Math.max(0, Math.min(100, pct)) / 10)
-  const bar = '▰'.repeat(filled) + '▱'.repeat(10 - filled)
-  parts.push(`Context ${pct === undefined ? '--' : `${pct}%`} ${bar}`)
-  if (usage.tokens !== undefined) parts.push(`${thousands(usage.tokens)}/${thousands(usage.window)}`)
-  if (usage.fiveHour !== undefined) parts.push(`5h ${usage.fiveHour}%`)
-  if (usage.sevenDay !== undefined) parts.push(`7d ${usage.sevenDay}%`)
-  if (usage.usd !== undefined) parts.push(`$${usage.usd.toFixed(2)}`)
+  const pct = percentOf(usage)
+  const parts = [`Context ${pct === undefined ? '--' : `${pct}%`} ${bar((pct ?? 0) / 100, 10)}`]
+  if (usage.tokens !== undefined) parts.push(`${thousands(usage.tokens)} of ${thousands(usage.window)}`)
+  if (usage.autoCompactAt !== undefined) parts.push(`compacts at ${thousands(usage.autoCompactAt)}`)
   return parts.join(' · ')
+}
+
+function limitsLine(usage: Usage | null): string | undefined {
+  if (usage === null) return undefined
+  const parts: string[] = []
+  if (usage.fiveHour !== undefined) parts.push(`5h window ${usage.fiveHour}%`)
+  if (usage.sevenDay !== undefined) parts.push(`7d window ${usage.sevenDay}%`)
+  if (usage.usd !== undefined) parts.push(`$${usage.usd.toFixed(2)} this session`)
+  return parts.length > 0 ? parts.join(' · ') : undefined
+}
+
+/** The breakdown rows: name, tokens, share of the window; zero rows left out. */
+function categoryRows(usage: Usage | null): { name: string; tokens: string; share: string; bar: string; isDeferred: boolean }[] {
+  if (usage === null || !usage.categories) return []
+  const window = usage.compactWindow ?? usage.window
+  return usage.categories
+    .filter((c: UsageCategory) => c.tokens > 0)
+    .map(c => ({
+      name: c.name,
+      tokens: thousands(c.tokens),
+      share: `${Math.round((c.tokens / window) * 100)}%`,
+      bar: bar(c.tokens / window, 12),
+      isDeferred: c.isDeferred,
+    }))
+}
+
+/**
+ * Reads the session's usage with the per-category breakdown (a local estimate,
+ * no request). Given `figures` (a measurement just pushed), those win and only
+ * the breakdown is merged in.
+ */
+async function measure($: Dollar, figures?: Measured): Promise<void> {
+  try {
+    const previous = await read($, usageAtom)
+    const detailed = await $.session.usage({ breakdown: 'summary' })
+    const source: Measured =
+      figures === undefined
+        ? detailed
+        : { ...figures, context: { ...figures.context, ...(detailed.context.breakdown ? { breakdown: detailed.context.breakdown } : {}) } }
+    await update($, usageAtom, () => usageOf(source, previous))
+  } catch (error) {
+    $.ui.log(`dog-factory: could not read usage: ${String(error)}`, { to: 'debug' })
+    if (figures !== undefined) {
+      const previous = await read($, usageAtom)
+      await update($, usageAtom, () => usageOf(figures, previous))
+    }
+  }
 }
 
 const INSTRUCTIONS = `# Dog Factory board
@@ -151,12 +228,7 @@ export const register: Register = on => {
     }
     await update($, runningAtom, () => [])
     await update($, foremanAtom, () => false)
-    try {
-      const measured = await $.session.usage()
-      await update($, usageAtom, () => usageOf(measured))
-    } catch (error) {
-      $.ui.log(`dog-factory: could not read usage: ${String(error)}`, { to: 'debug' })
-    }
+    await measure($)
 
     await $.tool.register({
       name: 'track',
@@ -243,7 +315,8 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('session.measure', async ($, e, next) => {
-    await update($, usageAtom, () => usageOf(e))
+    // The event carries the figures; the breakdown is fetched and merged in.
+    await measure($, e)
     return next(e)
   })
 
@@ -353,13 +426,48 @@ export const register: Register = on => {
 
     const pct = view.contextPercent
     const usageColor = pct === undefined ? undefined : pct >= 85 ? '#c94f3d' : pct >= 60 ? '#e0a040' : undefined
+    const rows = categoryRows(usage)
+    const limits = limitsLine(usage)
+    const nameWidth = Math.max(8, ...rows.map(r => r.name.length))
+    const tokenWidth = Math.max(4, ...rows.map(r => r.tokens.length))
+    const isNarrow = columns < 56
 
     return (
       <Box flexDirection="column">
         {scene}
-        <Text dimColor={usageColor === undefined} color={usageColor} size="footnote">
+        <Text weight="semibold" color={usageColor}>
           {usageLine(usage)}
         </Text>
+        {rows.map(r => (
+          <Box key={`ctx:${r.name}`} gap={1}>
+            <Text dimColor={r.isDeferred} mono>
+              {r.name.padEnd(nameWidth)}
+            </Text>
+            <Text mono tabular>
+              {r.tokens.padStart(tokenWidth)}
+            </Text>
+            <Text dimColor mono tabular>
+              {r.share.padStart(4)}
+            </Text>
+            {!isNarrow && <Text dimColor>{r.bar}</Text>}
+            {r.isDeferred && <Text dimColor>on demand</Text>}
+          </Box>
+        ))}
+        {(usage?.memoryFiles !== undefined || usage?.mcpTools !== undefined) && (
+          <Text dimColor size="footnote">
+            {[
+              usage.memoryFiles !== undefined ? `${usage.memoryFiles} memory file${usage.memoryFiles === 1 ? '' : 's'}` : '',
+              usage.mcpTools !== undefined ? `${usage.mcpTools} MCP tool${usage.mcpTools === 1 ? '' : 's'}` : '',
+            ]
+              .filter(Boolean)
+              .join(' · ')}
+          </Text>
+        )}
+        {limits && (
+          <Text dimColor size="footnote">
+            {limits}
+          </Text>
+        )}
 
         <Box flexDirection="column" marginTop={1}>
           <Text weight="semibold">Waiting on the boss {asks.length > 0 ? `(${asks.length})` : ''}</Text>

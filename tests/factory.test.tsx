@@ -33,7 +33,42 @@ function engine(on: On, store: Record<string, unknown> = {}) {
   on('ui.status', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('session.usage', () => ({ value: { startedAt: NOW, context: { window: 200_000 }, rateLimits: [] } }))
+  on('session.usage', (_, e) => ({
+    value: {
+      startedAt: NOW,
+      context: {
+        window: 200_000,
+        ...(e.breakdown
+          ? {
+              breakdown: {
+                categories: [
+                  { name: 'System prompt', tokens: 12_000, color: 'x', isDeferred: false, kind: 'system' },
+                  { name: 'MCP tools', tokens: 61_000, color: 'x', isDeferred: false, kind: 'mcp' },
+                  { name: 'Deferred tools', tokens: 9_000, color: 'x', isDeferred: true, kind: 'deferred' },
+                  { name: 'Messages', tokens: 0, color: 'x', isDeferred: false, kind: 'messages' },
+                  { name: 'Free space', tokens: 127_000, color: 'x', isDeferred: false, kind: 'free' },
+                ],
+                totalTokens: 73_000,
+                maxTokens: 200_000,
+                rawMaxTokens: 200_000,
+                autocompactSource: 'model',
+                percentage: 36,
+                gridRows: [],
+                model: 'm',
+                memoryFiles: [{ path: 'a', tokens: 1 }, { path: 'b', tokens: 2 }],
+                mcpTools: [{ name: 't', server: 's', tokens: 3 }],
+                agents: [],
+                autoCompactThreshold: 160_000,
+                isAutoCompactEnabled: true,
+                apiUsage: null,
+              },
+            }
+          : {}),
+      },
+      rateLimits: [],
+    },
+    // The stub fills only what the mod reads of the breakdown.
+  }) as never)
   on('session.measure', (_, e) => ({ changed: e.changed }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
@@ -270,7 +305,14 @@ test('context usage shows under the scene and follows each measurement', async (
   engine(on)
   await start($)
   const fresh = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await fresh.find({ type: 'Text', text: /^Context/ }))?.text).toBe('Context -- ▱▱▱▱▱▱▱▱▱▱')
+  expect((await fresh.find({ type: 'Text', text: /^Context/ }))?.text).toBe('Context -- ▱▱▱▱▱▱▱▱▱▱ · compacts at 160k')
+  // The breakdown rows, zero rows left out, deferred rows marked.
+  expect(await fresh.find({ type: 'Text', text: /System prompt/ })).toBeDefined()
+  expect(await fresh.find({ type: 'Text', text: /MCP tools\s*$/ })).toBeDefined()
+  expect(await fresh.find({ type: 'Text', text: /^Messages/ })).toBeUndefined()
+  expect(await fresh.find({ type: 'Text', text: 'on demand' })).toBeDefined()
+  expect(await fresh.find({ type: 'Text', text: '2 memory files · 1 MCP tool' })).toBeDefined()
+  expect((await fresh.findAll({ type: 'Text', text: '61k' })).length).toBeGreaterThan(0)
   await fresh.unmount()
 
   await $.session.measure({
@@ -284,7 +326,8 @@ test('context usage shows under the scene and follows each measurement', async (
   })
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect((await ui.find({ type: 'Text', text: /^Context/ }))?.text).toBe('Context 34% ▰▰▰▱▱▱▱▱▱▱ · 68k/200k · 5h 12% · 7d 40.5% · $1.23')
+    expect((await ui.find({ type: 'Text', text: /^Context/ }))?.text).toBe('Context 34% ▰▰▰▱▱▱▱▱▱▱ · 68k of 200k · compacts at 160k')
+    expect(await ui.find({ type: 'Text', text: '5h window 12% · 7d window 40.5% · $1.23 this session' })).toBeDefined()
     if (surface === 'desktop') {
       const svg = String((await ui.find({ type: 'Svg' }))?.props.source)
       expect(svg).toContain('CONTEXT')

@@ -24,6 +24,12 @@ export type RunningAgent = {
   startedAt: number
 }
 
+export type UsageCategory = {
+  name: string
+  tokens: number
+  isDeferred: boolean
+}
+
 export type Usage = {
   window: number
   tokens?: number
@@ -31,6 +37,14 @@ export type Usage = {
   fiveHour?: number
   sevenDay?: number
   usd?: number
+  /** The window the breakdown measures against (the compaction window). */
+  compactWindow?: number
+  /** Token count at which auto-compaction runs; absent when it is off. */
+  autoCompactAt?: number
+  /** Per-category estimate, as /context lists it. */
+  categories?: UsageCategory[]
+  memoryFiles?: number
+  mcpTools?: number
 }
 
 declare module 'claude-code' {

@@ -1,6 +1,6 @@
 # Dog Factory
 
-A Claude Code mod that keeps a pane of cute animated dogs working a factory beside your chat. The factory is your work board: open asks (what Claude is waiting on you for), next steps, and work shipped by subagents, with the context window's fill on a gauge on the wall.
+A Claude Code mod that keeps a pane of cute animated dogs working a factory beside your chat. The factory is your work board: open asks (what Claude is waiting on you for), next steps, and work shipped by subagents, with the context window's fill on a gauge on the wall and a per-category breakdown underneath. The scene is three floors tall (office, factory floor, shipping dock) and scales to the pane's width.
 
 ![The Dog Factory pane](docs/dog-factory.svg)
 
@@ -11,7 +11,7 @@ A Claude Code mod that keeps a pane of cute animated dogs working a factory besi
 - **Crates on the belt** are your next steps, numbered to match the list below. A step you sent to the prompt glows.
 - **Dogs holding "?" signs** wait at the boss's door for each open ask.
 - **Paw-stamped boxes** on the Shipped shelf are tasks subagents finished.
-- **The wall gauge** shows how full the context window is. A line under the scene gives the numbers: context tokens, the 5-hour and 7-day rate-limit windows, and the session's cost so far.
+- **The wall gauge** shows how full the context window is. Under the scene: tokens used of the window and where auto-compaction kicks in, then one row per category as `/context` lists them (system prompt, tools, MCP tools, memory files, messages, free space), then the 5-hour and 7-day rate-limit windows and the session's cost so far. The breakdown is a local estimate and sends no request.
 - An empty board shows one dog asleep in a basket with the lights dimmed.
 
 In a terminal the scene is drawn in text and animates twice a second.
