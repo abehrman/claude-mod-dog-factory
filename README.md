@@ -36,16 +36,18 @@ The board is stored per working directory, so another session in the same projec
 
 ## Install
 
-At the prompt of a terminal session:
+At the prompt of a terminal session, add the repo as a marketplace, then install from it:
 
 ```
-/plugin install dog-factory --marketplace abehrman/claude-mod-dog-factory
+/plugin marketplace add abehrman/claude-mod-dog-factory
+/plugin install dog-factory@claude-mod-dog-factory
 ```
 
-Answer `y` to add the marketplace, then pick a scope (user is first). From a shell:
+From a shell:
 
 ```
-claude plugin install dog-factory --marketplace abehrman/claude-mod-dog-factory
+claude plugin marketplace add abehrman/claude-mod-dog-factory
+claude plugin install dog-factory@claude-mod-dog-factory
 ```
 
 In the desktop app, where `/plugin` does not run: click + next to the prompt box, then Plugins, Add marketplace with `abehrman/claude-mod-dog-factory`, then Add plugin.
