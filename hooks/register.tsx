@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Board, Item, ItemKind, RunningAgent, Usage, UsageCategory } from '../types'
+import type { Board, Item, ItemKind, RunningAgent, Usage } from '../types'
 import {
   addItem,
   ageOf,
@@ -23,7 +23,8 @@ import {
   summary,
 } from './board'
 import { factoryRows } from './scene-ascii'
-import { factorySvg, sceneAlt } from './scene-svg'
+import { contextBarSvg, contextRows, contextTable, headline, limitsLine } from './context'
+import { factoryStrips, stripAlts } from './scene-svg'
 import type { SceneView } from './scene-svg'
 
 const PANE = 'factory'
@@ -43,7 +44,7 @@ type Measured = {
     tokens?: number
     percent?: number
     breakdown?: {
-      categories: { name: string; tokens: number; isDeferred: boolean }[]
+      categories: { name: string; tokens: number; kind?: 'used' | 'free' | 'buffer' | 'deferred'; isDeferred?: boolean }[]
       rawMaxTokens: number
       autoCompactThreshold?: number
       memoryFiles: unknown[]
@@ -65,7 +66,7 @@ function usageOf(m: Measured, previous: Usage | null): Usage {
   if (m.cost) usage.usd = m.cost.usd
   const b = m.context.breakdown
   if (b) {
-    usage.categories = b.categories.map(c => ({ name: c.name, tokens: c.tokens, isDeferred: c.isDeferred }))
+    usage.categories = b.categories.map(c => ({ name: c.name, tokens: c.tokens, kind: c.kind ?? (c.isDeferred ? 'deferred' : 'used') }))
     usage.compactWindow = b.rawMaxTokens
     if (b.autoCompactThreshold !== undefined) usage.autoCompactAt = b.autoCompactThreshold
     usage.memoryFiles = b.memoryFiles.length
@@ -79,52 +80,6 @@ function usageOf(m: Measured, previous: Usage | null): Usage {
     if (previous.mcpTools !== undefined) usage.mcpTools = previous.mcpTools
   }
   return usage
-}
-
-function thousands(n: number): string {
-  return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)
-}
-
-function percentOf(usage: Usage): number | undefined {
-  return usage.percent ?? (usage.tokens !== undefined ? Math.round((usage.tokens / usage.window) * 100) : undefined)
-}
-
-function bar(fraction: number, cells: number): string {
-  const filled = Math.round(Math.max(0, Math.min(1, fraction)) * cells)
-  return '▰'.repeat(filled) + '▱'.repeat(cells - filled)
-}
-
-function usageLine(usage: Usage | null): string {
-  if (usage === null) return 'Context: not measured yet'
-  const pct = percentOf(usage)
-  const parts = [`Context ${pct === undefined ? '--' : `${pct}%`} ${bar((pct ?? 0) / 100, 10)}`]
-  if (usage.tokens !== undefined) parts.push(`${thousands(usage.tokens)} of ${thousands(usage.window)}`)
-  if (usage.autoCompactAt !== undefined) parts.push(`compacts at ${thousands(usage.autoCompactAt)}`)
-  return parts.join(' · ')
-}
-
-function limitsLine(usage: Usage | null): string | undefined {
-  if (usage === null) return undefined
-  const parts: string[] = []
-  if (usage.fiveHour !== undefined) parts.push(`5h window ${usage.fiveHour}%`)
-  if (usage.sevenDay !== undefined) parts.push(`7d window ${usage.sevenDay}%`)
-  if (usage.usd !== undefined) parts.push(`$${usage.usd.toFixed(2)} this session`)
-  return parts.length > 0 ? parts.join(' · ') : undefined
-}
-
-/** The breakdown rows: name, tokens, share of the window; zero rows left out. */
-function categoryRows(usage: Usage | null): { name: string; tokens: string; share: string; bar: string; isDeferred: boolean }[] {
-  if (usage === null || !usage.categories) return []
-  const window = usage.compactWindow ?? usage.window
-  return usage.categories
-    .filter((c: UsageCategory) => c.tokens > 0)
-    .map(c => ({
-      name: c.name,
-      tokens: thousands(c.tokens),
-      share: `${Math.round((c.tokens / window) * 100)}%`,
-      bar: bar(c.tokens / window, 12),
-      isDeferred: c.isDeferred,
-    }))
 }
 
 /**
@@ -213,6 +168,7 @@ function sceneOf(board: Board, running: RunningAgent[], isForemanBusy: boolean, 
     .map((item, i) => (isStarted(item) ? i : -1))
     .filter(i => i >= 0)
   if (active.length > 0) view.activeSteps = active
+  view.shippedNames = shipped(board).map(i => i.dog ?? 'Dog')
   return view
 }
 
@@ -381,7 +337,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text, Button, Markdown } = $.ui.resolve(e)
     const board = await read($, boardAtom)
     const running = await read($, runningAtom)
     const isBusy = await read($, foremanAtom)
@@ -390,7 +346,9 @@ export const register: Register = on => {
     const view = sceneOf(board, running, isBusy, usage)
     const columns = e.props.bodyColumns
 
+    // The scene: three short full-width strips on a drawing surface, text rows in a terminal.
     let scene
+    let contextBar
     if (e.surface === 'terminal') {
       const frame = await read($, frameAtom)
       scene = (
@@ -400,9 +358,26 @@ export const register: Register = on => {
           ))}
         </Box>
       )
+      const rows = contextRows(usage).filter(r => r.kind !== 'free')
+      const cells = Math.max(10, Math.min(30, Math.floor((columns - 2) / 2)))
+      if (rows.length > 0) {
+        let line = ''
+        for (const r of rows) line += r.key.repeat(Math.round(r.share * cells))
+        contextBar = <Text>{line}</Text>
+      }
     } else {
       const { Svg } = $.ui.resolve(e)
-      scene = <Svg source={factorySvg(view)} alt={sceneAlt(view)} isInteractive />
+      const strips = factoryStrips(view)
+      const alts = stripAlts(view)
+      scene = (
+        <Box flexDirection="column">
+          <Svg source={strips.office} alt={alts.office} isInteractive />
+          <Svg source={strips.floor} alt={alts.floor} isInteractive />
+          <Svg source={strips.dock} alt={alts.dock} isInteractive />
+        </Box>
+      )
+      const svg = contextBarSvg(usage)
+      if (svg) contextBar = <Svg source={svg} alt="Context window by category" isInteractive />
     }
 
     const asks = openAsks(board)
@@ -426,59 +401,38 @@ export const register: Register = on => {
 
     const pct = view.contextPercent
     const usageColor = pct === undefined ? undefined : pct >= 85 ? '#c94f3d' : pct >= 60 ? '#e0a040' : undefined
-    const rows = categoryRows(usage)
+    const table = contextTable(usage)
     const limits = limitsLine(usage)
-    const nameWidth = Math.max(8, ...rows.map(r => r.name.length))
-    const tokenWidth = Math.max(4, ...rows.map(r => r.tokens.length))
-    const isNarrow = columns < 56
 
     return (
       <Box flexDirection="column">
         {scene}
-        <Text weight="semibold" color={usageColor}>
-          {usageLine(usage)}
-        </Text>
-        {rows.map(r => (
-          <Box key={`ctx:${r.name}`} gap={1}>
-            <Text dimColor={r.isDeferred} mono>
-              {r.name.padEnd(nameWidth)}
-            </Text>
-            <Text mono tabular>
-              {r.tokens.padStart(tokenWidth)}
-            </Text>
-            <Text dimColor mono tabular>
-              {r.share.padStart(4)}
-            </Text>
-            {!isNarrow && <Text dimColor>{r.bar}</Text>}
-            {r.isDeferred && <Text dimColor>on demand</Text>}
-          </Box>
-        ))}
-        {(usage?.memoryFiles !== undefined || usage?.mcpTools !== undefined) && (
-          <Text dimColor size="footnote">
-            {[
-              usage.memoryFiles !== undefined ? `${usage.memoryFiles} memory file${usage.memoryFiles === 1 ? '' : 's'}` : '',
-              usage.mcpTools !== undefined ? `${usage.mcpTools} MCP tool${usage.mcpTools === 1 ? '' : 's'}` : '',
-            ]
-              .filter(Boolean)
-              .join(' · ')}
+
+        <Box flexDirection="column" marginTop={1}>
+          <Text weight="semibold" color={usageColor}>
+            {headline(usage)}
           </Text>
-        )}
-        {limits && (
-          <Text dimColor size="footnote">
-            {limits}
-          </Text>
-        )}
+          {contextBar}
+          {table && <Markdown text={table} />}
+          {limits && <Text dimColor>{limits}</Text>}
+        </Box>
 
         <Box flexDirection="column" marginTop={1}>
           <Text weight="semibold">Waiting on the boss {asks.length > 0 ? `(${asks.length})` : ''}</Text>
           {asks.length === 0 && <Text dimColor>No one at the door.</Text>}
           {asks.map(item => (
-            <Box key={`row:${item.id}`} gap={1} flexWrap="wrap">
-              <Text color="#c94f3d">?</Text>
-              <Text>{item.text}</Text>
-              <Text dimColor>{ageOf(item.createdAt, now)}</Text>
-              <Button key={`done:${item.id}`} label="Done" plain onPress={complete(item)} />
-              <Button key={`drop:${item.id}`} label="Drop" plain dimColor onPress={drop(item)} />
+            <Box key={`row:${item.id}`} flexDirection="column" marginTop={1}>
+              <Text>
+                <Text color="#c94f3d" weight="bold">
+                  {'? '}
+                </Text>
+                {item.text}
+              </Text>
+              <Box gap={1}>
+                <Text dimColor>{ageOf(item.createdAt, now)}</Text>
+                <Button key={`done:${item.id}`} label="Done" plain onPress={complete(item)} />
+                <Button key={`drop:${item.id}`} label="Drop" plain dimColor onPress={drop(item)} />
+              </Box>
             </Box>
           ))}
         </Box>
@@ -487,41 +441,51 @@ export const register: Register = on => {
           <Text weight="semibold">On the belt {steps.length > 0 ? `(${steps.length})` : ''}</Text>
           {steps.length === 0 && <Text dimColor>The belt is empty.</Text>}
           {steps.map((item, i) => (
-            <Box key={`row:${item.id}`} gap={1} flexWrap="wrap">
-              <Text color={isStarted(item) ? '#e0b84a' : '#8c5a2b'}>{isStarted(item) ? `{${i + 1}}` : `[${i + 1}]`}</Text>
-              <Text>{item.text}</Text>
-              {isStarted(item) ? (
-                <Text color="#e0b84a">in progress {ageOf(item.startedAt ?? now, now)}</Text>
-              ) : (
-                <Text dimColor>{ageOf(item.createdAt, now)}</Text>
-              )}
-              {!isStarted(item) && <Button key={`go:${item.id}`} label="To prompt" plain onPress={toPrompt(item)} />}
-              <Button key={`done:${item.id}`} label="Done" plain onPress={complete(item)} />
-              <Button key={`drop:${item.id}`} label="Drop" plain dimColor onPress={drop(item)} />
-            </Box>
-          ))}
-          {finished.map(item => (
-            <Box key={`row:${item.id}`} gap={1}>
-              <Text dimColor>✓</Text>
-              <Text dimColor strikethrough>
+            <Box key={`row:${item.id}`} flexDirection="column" marginTop={1}>
+              <Text>
+                <Text color={isStarted(item) ? '#e0b84a' : '#8c5a2b'} weight="bold">
+                  {isStarted(item) ? `{${i + 1}} ` : `[${i + 1}] `}
+                </Text>
                 {item.text}
               </Text>
+              <Box gap={1}>
+                {isStarted(item) ? (
+                  <Text color="#e0b84a">in progress {ageOf(item.startedAt ?? now, now)}</Text>
+                ) : (
+                  <Text dimColor>{ageOf(item.createdAt, now)}</Text>
+                )}
+                {!isStarted(item) && <Button key={`go:${item.id}`} label="To prompt" plain onPress={toPrompt(item)} />}
+                <Button key={`done:${item.id}`} label="Done" plain onPress={complete(item)} />
+                <Button key={`drop:${item.id}`} label="Drop" plain dimColor onPress={drop(item)} />
+              </Box>
             </Box>
           ))}
+          {finished.length > 0 && (
+            <Box flexDirection="column" marginTop={1}>
+              {finished.map(item => (
+                <Text dimColor strikethrough>
+                  {`✓ ${item.text}`}
+                </Text>
+              ))}
+            </Box>
+          )}
         </Box>
 
         <Box flexDirection="column" marginTop={1}>
           <Text weight="semibold">Shipped {boxes.length > 0 ? `(${shipped(board).length})` : ''}</Text>
           {boxes.length === 0 && <Text dimColor>Nothing shipped yet.</Text>}
           {boxes.map(item => (
-            <Box key={`row:${item.id}`} gap={1} flexWrap="wrap">
-              <Text color="#c94f3d">▣</Text>
-              <Text weight="semibold">{item.dog ?? 'Dog'}</Text>
-              <Text>{item.text}</Text>
-              <Text dimColor>
-                {item.durationMs !== undefined ? `${Math.max(1, Math.round(item.durationMs / 1000))}s` : ''}
+            <Box key={`row:${item.id}`} flexDirection="column" marginTop={1}>
+              <Text>
+                <Text color="#c94f3d">{'▣ '}</Text>
+                <Text weight="semibold">{item.dog ?? 'Dog'}</Text>
+                {` ${item.text}`}
               </Text>
-              {item.detail && <Text dimColor>{item.detail}</Text>}
+              <Text dimColor>
+                {[item.durationMs !== undefined ? `${Math.max(1, Math.round(item.durationMs / 1000))}s` : '', item.detail ?? '']
+                  .filter(Boolean)
+                  .join(' · ')}
+              </Text>
             </Box>
           ))}
         </Box>

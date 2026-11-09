@@ -10,6 +10,8 @@ export type SceneView = {
   contextPercent?: number
   /** Positions (0-based, among the open steps) of steps in progress. */
   activeSteps?: number[]
+  /** Who shipped each box on the shelf, oldest first. */
+  shippedNames?: string[]
 }
 
 /** How many of each the tall scene draws before a +N tag. */
@@ -72,14 +74,16 @@ const DEFS = `
   <clipPath id="belt-clip"><rect x="40" y="206" width="320" height="12" rx="6"/></clipPath>
 </defs>`
 
-// Three floors: the office (top), the factory floor (middle), the shipping dock (bottom).
-const WALL = `
-<rect width="400" height="320" fill="#f6efe6"/>
+// Three floors, each drawn in the same coordinates so a strip is one window
+// onto the whole: the office (y 0-124), the factory floor (124-236), the
+// shipping dock (236-320).
+const OFFICE = { y: 0, height: 124 } as const
+const FLOOR = { y: 124, height: 112 } as const
+const DOCK = { y: 236, height: 84 } as const
+
+const WALL_OFFICE = `
+<rect width="400" height="124" fill="#f6efe6"/>
 <rect y="118" width="400" height="6" fill="#cbbfae"/>
-<rect y="124" width="400" height="104" fill="#f1e8dc"/>
-<rect y="228" width="400" height="8" fill="#b9a995"/>
-<rect y="236" width="400" height="84" fill="#e9dfd1"/>
-<rect y="312" width="400" height="8" fill="#b9a995"/>
 <g fill="#cfe6f5" stroke="#9db7c7">
   <rect x="150" y="34" width="46" height="26" rx="3"/>
   <rect x="210" y="34" width="46" height="26" rx="3"/>
@@ -88,9 +92,16 @@ const WALL = `
   <path d="M173 34 v26 M150 47 h46 M233 34 v26 M210 47 h46"/>
 </g>
 <rect x="148" y="6" width="104" height="17" rx="4" fill="#c94f3d"/>
-<text x="200" y="18.5" text-anchor="middle" ${FONT} font-size="10" font-weight="700" fill="#fff" letter-spacing="1">DOG FACTORY</text>
-<text x="8" y="134" ${FONT} font-size="6" fill="#9c8a74" letter-spacing="1.5">FLOOR</text>
-<text x="8" y="246" ${FONT} font-size="6" fill="#9c8a74" letter-spacing="1.5">SHIPPING</text>`
+<text x="200" y="18.5" text-anchor="middle" ${FONT} font-size="10" font-weight="700" fill="#fff" letter-spacing="1">DOG FACTORY</text>`
+
+const WALL_FLOOR = `
+<rect y="124" width="400" height="104" fill="#f1e8dc"/>
+<rect y="228" width="400" height="8" fill="#b9a995"/>
+<text x="8" y="134" ${FONT} font-size="6" fill="#9c8a74" letter-spacing="1.5">FLOOR</text>`
+
+const WALL_DOCK = `
+<rect y="236" width="400" height="84" fill="#e9dfd1"/>
+<rect y="312" width="400" height="8" fill="#b9a995"/>`
 
 function foreman(isBusy: boolean): string {
   const coat = '#8d6748'
@@ -275,27 +286,34 @@ function workers(list: SceneView['workers']): string {
   return out
 }
 
-function dock(shipped: number): string {
+function dock(shipped: number, names: string[] = []): string {
   let out = `
+<text x="8" y="248" ${FONT} font-size="6" fill="#9c8a74" letter-spacing="1.5">SHIPPING${shipped > 0 ? ` · ${shipped} SHIPPED` : ''}</text>
 <rect x="40" y="298" width="320" height="4" fill="#8c5a2b"/>
 <rect x="46" y="302" width="4" height="10" fill="#8c5a2b"/>
 <rect x="350" y="302" width="4" height="10" fill="#8c5a2b"/>
-<text x="40" y="268" ${FONT} font-size="6.5" fill="#6b5c4d" letter-spacing="1.5">SHIPPED</text>
-<g transform="translate(372 292)">
+<g transform="translate(374 292)">
   <rect x="-1" y="-30" width="2" height="30" fill="#555" transform="rotate(-12)"/>
   <rect x="-8" y="-2" width="14" height="2" fill="#555"/>
   <circle cx="-5" cy="4" r="3.5" fill="#333"/>
   <circle cx="5" cy="4" r="3.5" fill="#333"/>
 </g>`
   const shown = Math.min(shipped, SHELF_CAP)
+  // The newest boxes are the ones shown; each carries the name of the dog that shipped it.
+  const recent = names.slice(-shown)
   for (let i = 0; i < shown; i++) {
-    out += `<use href="#shipped" x="${44 + i * 24}" y="282"/>`
+    const x = 46 + i * 30
+    const name = recent[i]
+    out += `<use href="#shipped" x="${x}" y="282"/>`
+    if (name) {
+      out += `<text x="${x + 8}" y="277" text-anchor="middle" ${FONT} font-size="5.5" font-weight="600" fill="#4a3b2d">${esc(name)}</text>`
+    }
   }
   if (shipped > SHELF_CAP) {
-    out += `<text x="330" y="294" text-anchor="end" ${FONT} font-size="8" font-weight="700" fill="#4a3b2d">+${shipped - SHELF_CAP}</text>`
+    out += `<text x="354" y="294" text-anchor="end" ${FONT} font-size="8" font-weight="700" fill="#4a3b2d">+${shipped - SHELF_CAP}</text>`
   }
   if (shipped === 0) {
-    out += `<text x="200" y="294" text-anchor="middle" ${FONT} font-size="7" fill="#9c8a74">nothing shipped yet</text>`
+    out += `<text x="200" y="290" text-anchor="middle" ${FONT} font-size="7" fill="#9c8a74">nothing shipped yet</text>`
   }
   return out
 }
@@ -324,12 +342,56 @@ function basket(): string {
 <text x="200" y="160" text-anchor="middle" ${FONT} font-size="7.5" fill="#6b5c4d">All quiet on the floor.</text>`
 }
 
+function isIdle(view: SceneView): boolean {
+  return view.asks === 0 && view.steps === 0 && view.workers.length === 0
+}
+
+function parts(view: SceneView): { office: string; floor: string; dock: string } {
+  return {
+    office: `${WALL_OFFICE}${gauge(view.contextPercent)}${door(view.asks)}${foreman(view.isForemanBusy)}`,
+    floor: isIdle(view)
+      ? `${WALL_FLOOR}${belt()}${basket()}`
+      : `${WALL_FLOOR}${workers(view.workers)}${belt()}${crates(view.steps, view.activeSteps)}`,
+    dock: `${WALL_DOCK}${dock(view.shipped, view.shippedNames)}`,
+  }
+}
+
+// The markup asks for three times the viewBox, wider than any pane: the surface
+// draws it at the slot's width and keeps the aspect, so each strip spans the pane.
+const SCALE = 3
+
+function doc(y: number, height: number, body: string, isDim: boolean): string {
+  const dim = isDim ? `<rect y="${y}" width="400" height="${height}" fill="#1b2230" opacity="0.28"/>` : ''
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 ${y} 400 ${height}" width="${400 * SCALE}" height="${height * SCALE}" role="img">${DEFS}${body}${dim}</svg>`
+}
+
+/** The whole factory as one drawing, 400 by 320. */
 export function factorySvg(view: SceneView): string {
-  const isIdle = view.asks === 0 && view.steps === 0 && view.workers.length === 0
-  const body = isIdle
-    ? `${WALL}${gauge(view.contextPercent)}${door(0)}${foreman(view.isForemanBusy)}${belt()}${basket()}${dock(view.shipped)}<rect width="400" height="320" fill="#1b2230" opacity="0.28"/>`
-    : `${WALL}${gauge(view.contextPercent)}${door(view.asks)}${foreman(view.isForemanBusy)}${workers(view.workers)}${belt()}${crates(view.steps, view.activeSteps)}${dock(view.shipped)}`
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 320" width="100%" role="img">${DEFS}${body}</svg>`
+  const p = parts(view)
+  return doc(0, 320, `${p.office}${p.floor}${p.dock}`, isIdle(view))
+}
+
+/**
+ * The factory as three stacked strips, one per floor. Each is short and wide,
+ * so a pane draws it at full width whatever height it allows one drawing.
+ */
+export function factoryStrips(view: SceneView): { office: string; floor: string; dock: string } {
+  const p = parts(view)
+  const dim = isIdle(view)
+  return {
+    office: doc(OFFICE.y, OFFICE.height, p.office, dim),
+    floor: doc(FLOOR.y, FLOOR.height, p.floor, dim),
+    dock: doc(DOCK.y, DOCK.height, p.dock, dim),
+  }
+}
+
+export function stripAlts(view: SceneView): { office: string; floor: string; dock: string } {
+  const pct = view.contextPercent !== undefined ? `, context window ${Math.round(view.contextPercent)}% full` : ''
+  return {
+    office: `Office: ${view.isForemanBusy ? 'foreman dog typing' : 'foreman dog asleep'}, ${view.asks} dog${view.asks === 1 ? '' : 's'} waiting at the boss's door${pct}.`,
+    floor: `Factory floor: ${view.workers.length} worker dog${view.workers.length === 1 ? '' : 's'} at the belt, ${view.steps} crate${view.steps === 1 ? '' : 's'} on the belt.`,
+    dock: `Shipping dock: ${view.shipped} box${view.shipped === 1 ? '' : 'es'} shipped.`,
+  }
 }
 
 export function sceneAlt(view: SceneView): string {

@@ -19,6 +19,11 @@ const PANE = {
 } as const
 
 const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
+
+/** Every scene strip's markup, joined: the office, the floor and the dock. */
+async function sceneOf(ui: { findAll: (q: { type: string }) => Promise<{ props: Record<string, unknown> }[]> }): Promise<string> {
+  return (await ui.findAll({ type: 'Svg' })).map(s => String(s.props.source)).join('\n')
+}
 const CWD = 'C:/proj'
 const NOW = 1_700_000_000_000
 
@@ -42,10 +47,11 @@ function engine(on: On, store: Record<string, unknown> = {}) {
           ? {
               breakdown: {
                 categories: [
-                  { name: 'System prompt', tokens: 12_000, color: 'x', isDeferred: false, kind: 'system' },
-                  { name: 'MCP tools', tokens: 61_000, color: 'x', isDeferred: false, kind: 'mcp' },
-                  { name: 'Deferred tools', tokens: 9_000, color: 'x', isDeferred: true, kind: 'deferred' },
-                  { name: 'Messages', tokens: 0, color: 'x', isDeferred: false, kind: 'messages' },
+                  { name: 'System prompt', tokens: 12_000, color: 'x', isDeferred: false, kind: 'used' },
+                  { name: 'MCP tools', tokens: 61_000, color: 'x', isDeferred: false, kind: 'used' },
+                  { name: 'MCP tools (deferred)', tokens: 9_000, color: 'x', isDeferred: true, kind: 'deferred' },
+                  { name: 'Messages', tokens: 0, color: 'x', isDeferred: false, kind: 'used' },
+                  { name: 'Autocompact buffer', tokens: 33_000, color: 'x', isDeferred: false, kind: 'buffer' },
                   { name: 'Free space', tokens: 127_000, color: 'x', isDeferred: false, kind: 'free' },
                 ],
                 totalTokens: 73_000,
@@ -149,8 +155,8 @@ test('a spawned agent works the belt and ships when its turn completes', async (
 
   const name = dogName('a1')
   const desk = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(String((await desk.find({ type: 'Svg' }))?.props.source)).toContain(name)
-  expect(String((await desk.find({ type: 'Svg' }))?.props.source)).toContain('Review the diff')
+  expect(await sceneOf(desk)).toContain(name)
+  expect(await sceneOf(desk)).toContain('Review the diff')
   await desk.unmount()
   const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await term.find({ type: 'Text', text: name.slice(0, 8) })).toBeDefined()
@@ -273,7 +279,7 @@ test('buttons complete, drop and send a step to the prompt', async ($, on) => {
   await first.unmount()
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(String((await ui.find({ type: 'Svg' }))?.props.source)).toContain('crate-active')
+  expect(await sceneOf(ui)).toContain('crate-active')
   const board = String((await $.tool.call({ tool: 'mcp__dog-factory__track' })).result)
   expect(board).toContain(`[${stepId}] step (in progress): Run the migration`)
 
@@ -305,14 +311,21 @@ test('context usage shows under the scene and follows each measurement', async (
   engine(on)
   await start($)
   const fresh = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await fresh.find({ type: 'Text', text: /^Context/ }))?.text).toBe('Context -- ▱▱▱▱▱▱▱▱▱▱ · compacts at 160k')
-  // The breakdown rows, zero rows left out, deferred rows marked.
-  expect(await fresh.find({ type: 'Text', text: /System prompt/ })).toBeDefined()
-  expect(await fresh.find({ type: 'Text', text: /MCP tools\s*$/ })).toBeDefined()
-  expect(await fresh.find({ type: 'Text', text: /^Messages/ })).toBeUndefined()
-  expect(await fresh.find({ type: 'Text', text: 'on demand' })).toBeDefined()
-  expect(await fresh.find({ type: 'Text', text: '2 memory files · 1 MCP tool' })).toBeDefined()
-  expect((await fresh.findAll({ type: 'Text', text: '61k' })).length).toBeGreaterThan(0)
+  expect((await fresh.find({ type: 'Text', text: /^Context/ }))?.text).toBe('Context -- · compacts at 160k')
+  // One table: what is in the window, largest first; empty rows left out; on-demand tools apart.
+  const table = String((await fresh.find({ type: 'Markdown' }))?.props.text)
+  expect(table).toContain('| 🟦 | MCP tools | 61k | 31% |')
+  expect(table).toContain('| 🟩 | System prompt | 12k | 6% |')
+  expect(table).toContain('| ⬛ | Autocompact buffer | 33k | 17% |')
+  expect(table).toContain('| ⬜ | Free space | 127k | 64% |')
+  expect(table).not.toContain('Messages')
+  expect(table.indexOf('MCP tools |')).toBeLessThan(table.indexOf('System prompt'))
+  expect(table).toContain('Loaded only on demand, outside the window: MCP tools 9k')
+  expect(table).toContain('2 memory files · 1 MCP tool')
+  // The stacked bar, with a tick where compaction runs.
+  const bar = (await fresh.findAll({ type: 'Svg' })).find(s => String(s.props.alt).startsWith('Context window'))
+  expect(String(bar?.props.source)).toContain('#4a90d9')
+  expect(String(bar?.props.source)).toContain('#c94f3d')
   await fresh.unmount()
 
   await $.session.measure({
@@ -326,7 +339,8 @@ test('context usage shows under the scene and follows each measurement', async (
   })
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect((await ui.find({ type: 'Text', text: /^Context/ }))?.text).toBe('Context 34% ▰▰▰▱▱▱▱▱▱▱ · 68k of 200k · compacts at 160k')
+    expect((await ui.find({ type: 'Text', text: /^Context/ }))?.text).toBe('Context 34% · 68k of 200k · compacts at 160k')
+    expect(String((await ui.find({ type: 'Markdown' }))?.props.text)).toContain('MCP tools | 61k')
     expect(await ui.find({ type: 'Text', text: '5h window 12% · 7d window 40.5% · $1.23 this session' })).toBeDefined()
     if (surface === 'desktop') {
       const svg = String((await ui.find({ type: 'Svg' }))?.props.source)

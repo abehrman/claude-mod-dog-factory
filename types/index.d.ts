@@ -27,7 +27,8 @@ export type RunningAgent = {
 export type UsageCategory = {
   name: string
   tokens: number
-  isDeferred: boolean
+  /** used: in the window. free: window left. buffer: compaction reserve. deferred: loaded on demand, outside the window. */
+  kind?: 'used' | 'free' | 'buffer' | 'deferred'
 }
 
 export type Usage = {

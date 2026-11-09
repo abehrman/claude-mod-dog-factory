@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { factoryRows } from '../hooks/scene-ascii'
-import { factorySvg, sceneAlt } from '../hooks/scene-svg'
+import { factoryStrips, factorySvg, sceneAlt, stripAlts } from '../hooks/scene-svg'
 import type { SceneView } from '../hooks/scene-svg'
 
 const BUSY: SceneView = {
@@ -42,7 +42,27 @@ test('the wall gauge shows the context fill', () => {
   expect(svg).toContain('Context window 72% full')
   expect(factorySvg(BUSY)).toContain('>--<')
   expect(svg).toContain('viewBox="0 0 400 320"')
-  expect(svg).toContain('width="100%"')
+  expect(svg).toContain('width="1200" height="960"')
+})
+
+test('the scene splits into three full-width floor strips', () => {
+  const strips = factoryStrips({ ...BUSY, contextPercent: 40, activeSteps: [0], shippedNames: ['Mochi'] })
+  expect(strips.office).toContain('viewBox="0 0 400 124"')
+  expect(strips.floor).toContain('viewBox="0 124 400 112"')
+  expect(strips.dock).toContain('viewBox="0 236 400 84"')
+  for (const s of [strips.office, strips.floor, strips.dock]) {
+    expect(s).toStartWith('<svg')
+    expect(s.length).toBeLessThan(131072)
+  }
+  expect(strips.office).toContain('CONTEXT')
+  expect(strips.floor).toContain('Biscuit')
+  expect(strips.floor).toContain('crate-active')
+  expect(strips.dock).toContain('Mochi')
+  expect(strips.dock).toContain('1 SHIPPED')
+  const alts = stripAlts(BUSY)
+  expect(alts.office).toContain('typing')
+  expect(alts.floor).toContain('2 worker dogs')
+  expect(alts.dock).toContain('1 box shipped')
 })
 
 test('steps in progress light up their crates', () => {
